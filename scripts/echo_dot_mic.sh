@@ -19,28 +19,30 @@ adb_ok() {
     adb -s "$1" shell "echo ok" >/dev/null 2>&1
 }
 
-kill_mic_guard() {
-    local pids
-    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /data/local/tmp/mic_guard | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
-    for pid in $pids; do
-        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
-    done
+# Kill a process on the device by matching its cmdline path
+device_kill() {
+    local match="$1"
+    # Use owner_pid from PCM status if killing echo_mic (most reliable)
+    # Otherwise scan ps output with busybox awk
+    adb -s "$SERIAL" shell "su -c '/data/adb/magisk/busybox killall -9 \$(basename $match) 2>/dev/null; true'" 2>/dev/null || true
 }
 
-kill_echo_mic() {
-    local pids
-    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /data/local/tmp/echo_mic | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
-    for pid in $pids; do
-        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
-    done
+kill_mic_guard() { device_kill "/data/local/tmp/mic_guard"; }
+kill_echo_mic()  {
+    # Also kill via PCM owner_pid (most reliable)
+    local owner
+    owner=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+    [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null && \
+        adb -s "$SERIAL" shell "su -c 'kill -9 $owner'" 2>/dev/null || true
+    device_kill "/data/local/tmp/echo_mic"
 }
 
 kill_mediaserver() {
-    local pids
-    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /system/bin/mediaserver | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
-    for pid in $pids; do
-        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
-    done
+    adb -s "$SERIAL" shell "su -c 'stop media; setprop ctl.stop media'" 2>/dev/null || true
+    local owner
+    owner=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+    [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null && \
+        adb -s "$SERIAL" shell "su -c 'kill -9 $owner'" 2>/dev/null || true
 }
 
 wait_for_mic_closed() {
@@ -100,6 +102,11 @@ echo "╔═══════════════════════�
 echo "║  Echo Dot 2 → Mac Microphone (BlackHole) ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
+
+# Kill any leftover processes from a previous run
+pkill -f "nc.*54399" 2>/dev/null || true
+kill_echo_mic
+kill_mic_guard
 
 # Boost hardware mic gain BEFORE stopping media service
 adb -s "$SERIAL" shell "su -c 'tinymix 92 60 60; tinymix 110 60 60; tinymix 128 60 60; tinymix 146 60 60'" 2>/dev/null
