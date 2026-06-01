@@ -19,12 +19,12 @@ adb_ok() {
     adb -s "$1" shell "echo ok" >/dev/null 2>&1
 }
 
-# Kill a process on the device by matching its cmdline path
+# Kill a process on the device by matching its full path
 device_kill() {
     local match="$1"
-    # Use owner_pid from PCM status if killing echo_mic (most reliable)
-    # Otherwise scan ps output with busybox awk
-    adb -s "$SERIAL" shell "su -c '/data/adb/magisk/busybox killall -9 \$(basename $match) 2>/dev/null; true'" 2>/dev/null || true
+    # Extract just the filename without basename command
+    local name="${match##*/}"
+    adb -s "$SERIAL" shell "su -c '/data/adb/magisk/busybox killall -9 $name 2>/dev/null; true'" 2>/dev/null || true
 }
 
 kill_mic_guard() { device_kill "/data/local/tmp/mic_guard"; }
@@ -136,13 +136,18 @@ if [ "$SERIAL" = "$ECHO_IP:$ADB_PORT" ]; then
     LOCAL_IP=$(ipconfig getifaddr en1 2>/dev/null || ipconfig getifaddr en0 2>/dev/null)
     TCP_PORT=54399
     echo "[*] WiFi mode: Echo Dot → TCP $LOCAL_IP:$TCP_PORT → ffmpeg"
+    # Start nc listener + ffmpeg pipeline FIRST, then start echo_mic on device
     nc -l "$TCP_PORT" | \
     ffmpeg -hide_banner -loglevel warning \
         -f s24le -ar 16000 -ac 9 -i pipe:0 \
         -filter_complex "$FFMPEG_FILTER" \
         -f audiotoolbox -audio_device_index "$BLACKHOLE_INDEX" - &
     STREAM_PID=$!
-    sleep 1
+    # Wait until nc is actually listening before telling device to connect
+    for i in $(seq 1 10); do
+        lsof -nP -iTCP:$TCP_PORT -sTCP:LISTEN >/dev/null 2>&1 && break
+        sleep 0.5
+    done
     adb -s "$SERIAL" shell "su -c '$DEVICE_BIN $LOCAL_IP $TCP_PORT 0'" &
 else
     # USB: exec-out is fast and reliable
