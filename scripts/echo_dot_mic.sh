@@ -31,21 +31,34 @@ kill_echo_mic() {
 kill_mic_guard() { device_kill "/data/local/tmp/mic_guard"; }
 
 free_mic() {
+    # Stop media service and kill any process holding the mic
     adb -s "$SERIAL" shell "su -c 'stop media; setprop ctl.stop media'" 2>/dev/null || true
-    kill_echo_mic
+    sleep 2  # wait for mediaserver to release the device
+    # Kill whatever grabbed it after restart
+    local owner
+    owner=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" \
+            | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+    if [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null; then
+        adb -s "$SERIAL" shell "su -c 'kill -9 $owner'" 2>/dev/null || true
+    fi
 }
 
 wait_for_mic_closed() {
-    for i in $(seq 1 20); do
+    free_mic
+    for i in $(seq 1 10); do
         local s
         s=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" || true)
         if echo "$s" | grep -qE "^state: (closed|OPEN)$"; then
             return 0
         fi
-        free_mic
+        # mediaserver restarted and grabbed mic again — kill it
+        local owner
+        owner=$(echo "$s" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+        [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null && \
+            adb -s "$SERIAL" shell "su -c 'kill -9 $owner'" 2>/dev/null || true
         sleep 1
     done
-    echo "ERROR: mic still busy after 20s" >&2
+    echo "ERROR: mic still busy after retries" >&2
     return 1
 }
 
