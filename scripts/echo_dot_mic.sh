@@ -27,6 +27,14 @@ kill_mic_guard() {
     done
 }
 
+kill_echo_mic() {
+    local pids
+    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /data/local/tmp/echo_mic | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
+    for pid in $pids; do
+        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
+    done
+}
+
 kill_mediaserver() {
     local pids
     pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /system/bin/mediaserver | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
@@ -81,6 +89,7 @@ cleanup() {
     echo ""
     echo "Stopping stream..."
     [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
+    kill_echo_mic
     kill_mic_guard
     adb -s "$SERIAL" shell "su -c 'setprop ctl.start mediaserver'" 2>/dev/null || true
     echo "Done. mediaserver restored."
@@ -94,6 +103,9 @@ echo ""
 
 # Boost hardware mic gain BEFORE killing mediaserver
 adb -s "$SERIAL" shell "su -c 'tinymix 92 60 60; tinymix 110 60 60; tinymix 128 60 60; tinymix 146 60 60'" 2>/dev/null
+
+# Clear stale capture processes left by interrupted shell/ADB sessions.
+kill_echo_mic
 
 # Stop mediaserver cleanly while using the mic. It is not a kernel-critical
 # process, but Alexa/system audio will be unavailable until cleanup restores it.
