@@ -13,29 +13,75 @@ ADB_PORT="5555"
 DEVICE_BIN="/data/local/tmp/echo_mic"
 GAIN=10                    # 音量放大倍数
 BLACKHOLE_INDEX=1          # BlackHole 的 audiotoolbox 设备索引
+STREAM_PID=""
 
-# Connect via WiFi ADB
-echo "[*] Connecting WiFi ADB ($ECHO_IP:$ADB_PORT)..."
-adb connect "$ECHO_IP:$ADB_PORT" >/dev/null 2>&1
-sleep 1
-SERIAL="$ECHO_IP:$ADB_PORT"
+adb_ok() {
+    adb -s "$1" shell "echo ok" >/dev/null 2>&1
+}
 
-if ! adb -s "$SERIAL" shell "echo ok" >/dev/null 2>&1; then
-    # Fallback to USB
-    SERIAL="G090LF0965021FUG"
-    if ! adb -s "$SERIAL" shell "echo ok" >/dev/null 2>&1; then
-        echo "ERROR: Cannot connect to Echo Dot via WiFi or USB" >&2
+kill_mic_guard() {
+    local pids
+    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /data/local/tmp/mic_guard | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
+    for pid in $pids; do
+        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
+    done
+}
+
+kill_mediaserver() {
+    local pids
+    pids=$(adb -s "$SERIAL" shell "su -c 'ps | grep /system/bin/mediaserver | grep -v grep'" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)
+    for pid in $pids; do
+        adb -s "$SERIAL" shell "su -c 'kill -9 $pid'" 2>/dev/null || true
+    done
+}
+
+wait_for_mic_closed() {
+    local status owner
+    for i in $(seq 1 30); do
+        status=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>&1")
+        if echo "$status" | grep -q closed; then
+            return 0
+        fi
+
+        owner=$(echo "$status" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+        if [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null; then
+            echo "[*] Microphone busy, owner thread PID $owner; stopping mediaserver..."
+        fi
+        adb -s "$SERIAL" shell "su -c 'setprop ctl.stop mediaserver; stop mediaserver'" 2>/dev/null || true
+        kill_mediaserver
+        sleep 1
+    done
+
+    status=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>&1")
+    echo "ERROR: Microphone is still busy; refusing to start empty stream." >&2
+    echo "$status" >&2
+    return 1
+}
+
+# Prefer USB if the cable is connected; fall back to WiFi ADB.
+USB_SERIAL="G090LF0965021FUG"
+WIFI_SERIAL="$ECHO_IP:$ADB_PORT"
+if adb_ok "$USB_SERIAL"; then
+    SERIAL="$USB_SERIAL"
+    echo "[*] Using USB connection ($SERIAL)"
+else
+    echo "[*] USB not available; connecting WiFi ADB ($WIFI_SERIAL)..."
+    adb connect "$WIFI_SERIAL" >/dev/null 2>&1 || true
+    sleep 1
+    if adb_ok "$WIFI_SERIAL"; then
+        SERIAL="$WIFI_SERIAL"
+        echo "[*] Using WiFi connection ($SERIAL)"
+    else
+        echo "ERROR: Cannot connect to Echo Dot via USB or WiFi" >&2
         exit 1
     fi
-    echo "[*] Using USB connection"
-else
-    echo "[*] Using WiFi connection"
 fi
 
 cleanup() {
     echo ""
     echo "Stopping stream..."
-    kill $STREAM_PID 2>/dev/null || true
+    [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
+    kill_mic_guard
     adb -s "$SERIAL" shell "su -c 'setprop ctl.start mediaserver'" 2>/dev/null || true
     echo "Done. mediaserver restored."
 }
@@ -49,21 +95,14 @@ echo ""
 # Boost hardware mic gain BEFORE killing mediaserver
 adb -s "$SERIAL" shell "su -c 'tinymix 92 60 60; tinymix 110 60 60; tinymix 128 60 60; tinymix 146 60 60'" 2>/dev/null
 
-# Ensure mic_guard is running (kills mediaserver if it grabs the mic)
-if ! adb -s "$SERIAL" shell "su -c 'ps | grep mic_guard | grep -v grep'" | grep -q mic_guard; then
-    MSPID=$(adb -s "$SERIAL" shell "ps | grep '/system/bin/mediaserver' | grep -v grep" | awk '{print $2}' | tr -d '\r')
-    [ -n "$MSPID" ] && adb -s "$SERIAL" shell "su -c 'kill -9 $MSPID'"
-    adb -s "$SERIAL" shell "su -c '/data/local/tmp/mic_guard &'"
-fi
+# Stop mediaserver cleanly while using the mic. It is not a kernel-critical
+# process, but Alexa/system audio will be unavailable until cleanup restores it.
+adb -s "$SERIAL" shell "su -c 'setprop ctl.stop mediaserver; stop mediaserver'" 2>/dev/null || true
+kill_mediaserver
 
 # Wait for mic to be free
 echo "[*] Waiting for microphone..."
-for i in $(seq 1 10); do
-    if adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>&1" | grep -q closed; then
-        break
-    fi
-    sleep 2
-done
+wait_for_mic_closed
 
 # Stream: Echo Dot mic → ADB → ffmpeg → BlackHole
 echo "[*] Streaming 8-mic array (beamformed) → BlackHole 2ch (volume x${GAIN})"

@@ -25,6 +25,7 @@ Echo Dot mic array (S24_3LE, 9ch, 16kHz)
 ```
 
 **mic_guard** is a daemon that runs on the Echo Dot and continuously kills any process that grabs `pcmC0D24c`, keeping the mic free for `echo_mic`.
+It only kills `mediaserver`; it does not kill this project's own `echo_mic` recorder.
 
 ### Why `tinycap` Doesn't Work
 
@@ -61,25 +62,17 @@ The Echo Dot's mic array uses `S24_3LE` format (24-bit, 3 bytes per sample, litt
 
 ## Setup
 
-### Step 1: Push Binaries to Echo Dot
+### Step 1: Run Setup
 
 ```bash
-adb connect <ECHO_DOT_IP>:5555
-adb push bin/echo_mic_arm64 /data/local/tmp/echo_mic
-adb push bin/mic_guard_arm64 /data/local/tmp/mic_guard
-adb shell "su -c 'chmod 755 /data/local/tmp/echo_mic /data/local/tmp/mic_guard'"
+./setup.sh
 ```
 
-### Step 2: Install Magisk Boot Script (auto-start on reboot)
+This pushes `echo_mic` and `mic_guard`, installs the Magisk boot startup snippet, sets mic gain, and starts `mic_guard` immediately.
 
-```bash
-adb push scripts/91-disable-mediaserver-mic.sh /data/local/tmp/
-adb shell "su -c 'cp /data/local/tmp/91-disable-mediaserver-mic.sh /data/adb/service.d/ && chmod 755 /data/adb/service.d/91-disable-mediaserver-mic.sh'"
-```
+The boot snippet is appended to `/data/adb/service.d/adb_tcp.sh`, because that script is known to run on this Echo Dot/Magisk build. The standalone `scripts/91-disable-mediaserver-mic.sh` is kept as a fallback for Magisk builds that execute independent `service.d` scripts reliably.
 
-This script runs 30 seconds after boot, sets mic gain, and starts `mic_guard` in the background.
-
-### Step 3: Configure the Mac Script
+### Step 2: Configure the Mac Script
 
 Edit `scripts/echo_dot_mic.sh` and set your Echo Dot's IP:
 
@@ -87,7 +80,7 @@ Edit `scripts/echo_dot_mic.sh` and set your Echo Dot's IP:
 ECHO_IP="192.168.31.89"   # ← change this
 ```
 
-### Step 4: Run
+### Step 3: Run
 
 ```bash
 chmod +x scripts/echo_dot_mic.sh
@@ -96,7 +89,28 @@ chmod +x scripts/echo_dot_mic.sh
 
 Then in any app (Discord, Zoom, Typeless, etc.), select **BlackHole 2ch** as the microphone input.
 
-Press `Ctrl+C` to stop. `mediaserver` is automatically restored.
+Press `Ctrl+C` to stop. The script stops `mic_guard` first, then restores `mediaserver`.
+
+### Manual Install
+
+```bash
+adb connect <ECHO_DOT_IP>:5555
+adb push bin/echo_mic_arm64 /data/local/tmp/echo_mic
+adb push bin/mic_guard_arm64 /data/local/tmp/mic_guard
+adb shell "su -c 'chmod 755 /data/local/tmp/echo_mic /data/local/tmp/mic_guard'"
+adb push scripts/adb_tcp_append.sh /data/local/tmp/
+adb shell "su -c 'touch /data/adb/service.d/adb_tcp.sh && chmod 755 /data/adb/service.d/adb_tcp.sh && cat /data/local/tmp/adb_tcp_append.sh >> /data/adb/service.d/adb_tcp.sh'"
+```
+
+After reboot, the managed boot snippet waits 45 seconds, sets mic gain, kills the initial mic owner if present, and launches `mic_guard` with `nohup`.
+
+Verify boot startup:
+
+```bash
+adb shell "su -c 'cat /data/adb/mic_disable.log'"
+adb shell "su -c 'ps | grep \"[m]ic_guard\"'"
+adb shell "cat /proc/asound/card0/pcm24c/sub0/status"
+```
 
 ---
 
@@ -130,7 +144,9 @@ EchoDotMic/
 │   └── mic_guard_arm64     # Prebuilt for arm64 Android
 ├── scripts/
 │   ├── echo_dot_mic.sh     # Mac: one-key stream to BlackHole
+│   ├── adb_tcp_append.sh   # Magisk startup snippet appended by setup.sh
 │   └── 91-disable-mediaserver-mic.sh  # Magisk boot script
+├── setup.sh                # One-key install/start script
 └── Makefile
 ```
 
@@ -207,9 +223,18 @@ adb connect <IP>:5555
 adb -s <USB_SERIAL> shell "su -c 'setprop service.adb.tcp.port 5555 && stop adbd && start adbd'"
 ```
 
+### Boot startup did not run
+
+```bash
+adb shell "su -c 'grep -n \"Echo Dot mic_guard startup\" /data/adb/service.d/adb_tcp.sh'"
+adb shell "su -c 'cat /data/adb/mic_disable.log'"
+```
+
+If the marker is missing, rerun `./setup.sh`. If the log shows `missing executable`, rerun setup to push `/data/local/tmp/mic_guard`.
+
 ### mediaserver keeps restarting too fast
 
-The `mic_guard` daemon polls every 3 seconds. If `mediaserver` restarts and grabs the mic within that window, there's a brief gap. This is normal — `mic_guard` will kill it again within 3 seconds.
+The `mic_guard` daemon polls every 2 seconds. If `mediaserver` restarts and grabs the mic within that window, there's a brief gap. This is normal — `mic_guard` will kill `mediaserver` again within 2 seconds.
 
 If you need the mic immediately (e.g., in the script), the script waits up to 20 seconds for `closed` status before starting the stream.
 

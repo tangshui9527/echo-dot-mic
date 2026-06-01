@@ -35,23 +35,40 @@ adb -s "$SERIAL" shell "su -c 'chmod 755 /data/local/tmp/echo_mic /data/local/tm
 # 3. 安装 Magisk 开机脚本（追加到已有的 adb_tcp.sh）
 echo "[3/5] 安装开机自启动脚本..."
 BOOT_SCRIPT="/data/adb/service.d/adb_tcp.sh"
-# 检查是否已经安装过
-if adb -s "$SERIAL" shell "su -c 'grep -q mic_guard $BOOT_SCRIPT 2>/dev/null && echo yes || echo no'" | grep -q "yes"; then
-    echo "    开机脚本已存在，跳过"
-else
-    adb -s "$SERIAL" push "$SCRIPT_DIR/scripts/adb_tcp_append.sh" /data/local/tmp/
-    adb -s "$SERIAL" shell "su -c 'cat /data/local/tmp/adb_tcp_append.sh >> $BOOT_SCRIPT'"
-    echo "    已追加到 $BOOT_SCRIPT"
+BOOT_MARKER="Echo Dot mic_guard startup (managed by setup.sh)"
+TMP_BOOT="$(mktemp)"
+cleanup_tmp() {
+    rm -f "$TMP_BOOT" "$TMP_BOOT.clean"
+}
+trap cleanup_tmp EXIT
+
+if ! adb -s "$SERIAL" shell "su -c 'cat $BOOT_SCRIPT 2>/dev/null'" > "$TMP_BOOT"; then
+    : > "$TMP_BOOT"
 fi
+
+perl -0pe '
+    s/\r\n/\n/g;
+    s/\r/\n/g;
+    s/\n?# ---- Echo Dot mic_guard startup \(managed by setup\.sh\) ----.*?# ---- end Echo Dot mic_guard startup ----\n?/\n/s;
+    s/\n?# ---- Echo Dot 麦克风守护进程 \(由 setup\.sh 追加\) ----\s*(?:tinymix [^\n]*\s*){4}\/data\/local\/tmp\/mic_guard &\s*echo "\[BOOT\] mic-guard started at \$\(date\)" >> \/data\/adb\/mic_disable\.log\s*/\n/s;
+    s/\n?# Set mic gain and start mic guard daemon\s*(?:tinymix [^\n]*\s*){4}\/data\/local\/tmp\/mic_guard &\s*echo "\[BOOT\] mic-guard started at \$\(date\)" >> \/data\/adb\/mic_disable\.log\s*/\n/s;
+' "$TMP_BOOT" > "$TMP_BOOT.clean"
+cat "$SCRIPT_DIR/scripts/adb_tcp_append.sh" >> "$TMP_BOOT.clean"
+adb -s "$SERIAL" push "$TMP_BOOT.clean" /data/local/tmp/adb_tcp.sh.new >/dev/null
+adb -s "$SERIAL" shell "su -c 'cp /data/local/tmp/adb_tcp.sh.new $BOOT_SCRIPT && chmod 755 $BOOT_SCRIPT'"
+echo "    已安装 managed 启动片段到 $BOOT_SCRIPT"
 
 # 4. 立即启动 mic_guard（无需重启）
 echo "[4/5] 启动 mic_guard 守护进程..."
 adb -s "$SERIAL" shell "su -c 'tinymix 92 60 60; tinymix 110 60 60; tinymix 128 60 60; tinymix 146 60 60'"
-# Kill mediaserver first
 MSPID=$(adb -s "$SERIAL" shell "ps | grep '/system/bin/mediaserver' | grep -v grep" | awk '{print $2}' | tr -d '\r')
 [ -n "$MSPID" ] && adb -s "$SERIAL" shell "su -c 'kill -9 $MSPID'" 2>/dev/null || true
-adb -s "$SERIAL" shell "su -c '/data/local/tmp/mic_guard'" &
-sleep 6
+if adb -s "$SERIAL" shell "su -c 'ps | grep \"[m]ic_guard\"'" | grep -q mic_guard; then
+    echo "    mic_guard 已在运行"
+else
+    adb -s "$SERIAL" shell "su -c 'if [ -x /data/adb/magisk/busybox ]; then /data/adb/magisk/busybox nohup /data/local/tmp/mic_guard >> /data/adb/mic_disable.log 2>&1 & else nohup /data/local/tmp/mic_guard >> /data/adb/mic_disable.log 2>&1 & fi'"
+    sleep 6
+fi
 
 # 5. 验证
 echo "[5/5] 验证..."

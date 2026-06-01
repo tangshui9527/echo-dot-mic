@@ -4,6 +4,29 @@
 #include <signal.h>
 #include <string.h>
 
+static int is_mediaserver(int pid) {
+    char path[64];
+    char cmdline[256];
+    FILE *f;
+    size_t n;
+
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    f = fopen(path, "r");
+    if (!f) {
+        return 0;
+    }
+
+    n = fread(cmdline, 1, sizeof(cmdline) - 1, f);
+    fclose(f);
+    if (n == 0) {
+        return 0;
+    }
+
+    cmdline[n] = '\0';
+    return strstr(cmdline, "/system/bin/mediaserver") != NULL ||
+           strstr(cmdline, "mediaserver") != NULL;
+}
+
 int main() {
     /* Wait for ALSA to initialize */
     sleep(10);
@@ -17,7 +40,7 @@ int main() {
                     char *colon = strchr(line, ':');
                     if (colon) {
                         int pid = atoi(colon + 1);
-                        if (pid > 1) {
+                        if (pid > 1 && is_mediaserver(pid)) {
                             kill(pid, 9);
                         }
                     }
