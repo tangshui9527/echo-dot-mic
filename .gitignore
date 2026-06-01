@@ -1,0 +1,3 @@
+# compiled binaries are checked in (prebuilt)
+# ignore macOS metadata
+.DS_Store
