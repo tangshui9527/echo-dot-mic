@@ -4,7 +4,7 @@ set -euo pipefail
 # ============================================================
 # Echo Dot 2 麦克风阵列 → Mac 虚拟麦克风 (BlackHole 2ch)
 # 用法: ./echo_dot_mic.sh
-# 停止: Ctrl+C (自动恢复 Echo Dot 的 mediaserver)
+# 停止: Ctrl+C (自动恢复 Echo Dot 的 media 服务)
 # ============================================================
 
 SERIAL="G090LF0965021FUG"
@@ -53,9 +53,9 @@ wait_for_mic_closed() {
 
         owner=$(echo "$status" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
         if [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null; then
-            echo "[*] Microphone busy, owner thread PID $owner; stopping mediaserver..."
+            echo "[*] Microphone busy, owner thread PID $owner; stopping media service..."
         fi
-        adb -s "$SERIAL" shell "su -c 'setprop ctl.stop mediaserver; stop mediaserver'" 2>/dev/null || true
+        adb -s "$SERIAL" shell "su -c 'setprop ctl.stop media; stop media'" 2>/dev/null || true
         kill_mediaserver
         sleep 1
     done
@@ -91,8 +91,8 @@ cleanup() {
     [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
     kill_echo_mic
     kill_mic_guard
-    adb -s "$SERIAL" shell "su -c 'setprop ctl.start mediaserver'" 2>/dev/null || true
-    echo "Done. mediaserver restored."
+    adb -s "$SERIAL" shell "su -c 'setprop ctl.start media; start media'" 2>/dev/null || true
+    echo "Done. media service restored."
 }
 trap cleanup EXIT INT TERM
 
@@ -101,15 +101,15 @@ echo "║  Echo Dot 2 → Mac Microphone (BlackHole) ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# Boost hardware mic gain BEFORE killing mediaserver
+# Boost hardware mic gain BEFORE stopping media service
 adb -s "$SERIAL" shell "su -c 'tinymix 92 60 60; tinymix 110 60 60; tinymix 128 60 60; tinymix 146 60 60'" 2>/dev/null
 
 # Clear stale capture processes left by interrupted shell/ADB sessions.
 kill_echo_mic
 
-# Stop mediaserver cleanly while using the mic. It is not a kernel-critical
+# Stop the Android media service cleanly while using the mic. It is not a kernel-critical
 # process, but Alexa/system audio will be unavailable until cleanup restores it.
-adb -s "$SERIAL" shell "su -c 'setprop ctl.stop mediaserver; stop mediaserver'" 2>/dev/null || true
+adb -s "$SERIAL" shell "su -c 'setprop ctl.stop media; stop media'" 2>/dev/null || true
 kill_mediaserver
 
 # Wait for mic to be free
@@ -122,12 +122,30 @@ echo "[*] Select 'BlackHole 2ch' as microphone in your apps"
 echo "[*] Press Ctrl+C to stop"
 echo ""
 
-# pan filter: average channels 0-7 (8 mics), skip channel 8 (reference)
-adb -s "$SERIAL" exec-out "su -c '$DEVICE_BIN 0'" | \
-ffmpeg -hide_banner -loglevel warning \
-    -f s24le -ar 16000 -ac 9 -i pipe:0 \
-    -filter_complex "pan=mono|c0=0.125*c0+0.125*c1+0.125*c2+0.125*c3+0.125*c4+0.125*c5+0.125*c6+0.125*c7,volume=${GAIN},aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo" \
-    -f audiotoolbox -audio_device_index "$BLACKHOLE_INDEX" - &
-STREAM_PID=$!
+FFMPEG_FILTER="pan=mono|c0=0.125*c0+0.125*c1+0.125*c2+0.125*c3+0.125*c4+0.125*c5+0.125*c6+0.125*c7,volume=${GAIN},aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo"
+
+if [ "$SERIAL" = "$ECHO_IP:$ADB_PORT" ]; then
+    # WiFi: echo_mic connects directly to Mac via TCP (bypasses ADB exec-out bottleneck)
+    LOCAL_IP=$(ipconfig getifaddr en1 2>/dev/null || ipconfig getifaddr en0 2>/dev/null)
+    TCP_PORT=54399
+    echo "[*] WiFi mode: Echo Dot → TCP $LOCAL_IP:$TCP_PORT → ffmpeg"
+    nc -l "$TCP_PORT" | \
+    ffmpeg -hide_banner -loglevel warning \
+        -f s24le -ar 16000 -ac 9 -i pipe:0 \
+        -filter_complex "$FFMPEG_FILTER" \
+        -f audiotoolbox -audio_device_index "$BLACKHOLE_INDEX" - &
+    STREAM_PID=$!
+    sleep 1
+    adb -s "$SERIAL" shell "su -c '$DEVICE_BIN $LOCAL_IP $TCP_PORT 0'" &
+else
+    # USB: exec-out is fast and reliable
+    echo "[*] USB mode: exec-out → ffmpeg"
+    adb -s "$SERIAL" exec-out "su -c '$DEVICE_BIN stdout 0'" | \
+    ffmpeg -hide_banner -loglevel warning \
+        -f s24le -ar 16000 -ac 9 -i pipe:0 \
+        -filter_complex "$FFMPEG_FILTER" \
+        -f audiotoolbox -audio_device_index "$BLACKHOLE_INDEX" - &
+    STREAM_PID=$!
+fi
 
 wait $STREAM_PID
