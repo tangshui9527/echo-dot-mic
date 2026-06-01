@@ -29,11 +29,13 @@ device_kill() {
 
 kill_mic_guard() { device_kill "/data/local/tmp/mic_guard"; }
 kill_echo_mic()  {
-    # Also kill via PCM owner_pid (most reliable)
+    # Primary: kill via PCM owner_pid (always accurate)
     local owner
-    owner=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" | grep owner_pid | cut -d: -f2 | tr -d ' \r' || true)
+    owner=$(adb -s "$SERIAL" shell "cat /proc/asound/card0/pcm24c/sub0/status 2>/dev/null" \
+            | grep owner_pid | cut -d: -f2 | tr -d ' \r')
     [ -n "$owner" ] && [ "$owner" -gt 1 ] 2>/dev/null && \
         adb -s "$SERIAL" shell "su -c 'kill -9 $owner'" 2>/dev/null || true
+    # Fallback: killall by name
     device_kill "/data/local/tmp/echo_mic"
 }
 
@@ -91,6 +93,7 @@ cleanup() {
     echo ""
     echo "Stopping stream..."
     [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
+    pkill -f "nc.*54399" 2>/dev/null || true   # kill Mac-side nc
     kill_echo_mic
     kill_mic_guard
     adb -s "$SERIAL" shell "su -c 'setprop ctl.start media; start media'" 2>/dev/null || true
